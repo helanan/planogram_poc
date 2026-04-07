@@ -1,10 +1,7 @@
 import os
 import streamlit as st
 from supabase import create_client
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.patches import FancyBboxPatch
-import matplotlib.patheffects as pe
+import plotly.graph_objects as go
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Heartland Supply Co. — Planogram", layout="wide")
@@ -39,6 +36,10 @@ if not url or not key:
 
 supabase = create_client(url, key)
 
+# ── Session state ─────────────────────────────────────────────────────────────
+if "selected_skus" not in st.session_state:
+    st.session_state.selected_skus = set()
+
 # ── Raw data ──────────────────────────────────────────────────────────────────
 response = supabase.table("shelf_layout").select("*, products(*)").execute()
 all_data = response.data
@@ -48,36 +49,57 @@ if not all_data:
     st.stop()
 
 all_baselines = sorted(set(item["y_pos"] for item in all_data))
+y_to_shelf    = {y: i + 1 for i, y in enumerate(all_baselines)}
 shelf_width   = 48
 shelf_gap     = 18
 SHELF_COLORS  = ["#E07B39", "#4A7C59", "#5B8DB8", "#C0392B", "#8E6BBF"]
 
-# Map raw y_pos → shelf number (1-based), stable across filters
-y_to_shelf = {y: i + 1 for i, y in enumerate(all_baselines)}
+def hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
 
-# ── Sidebar filters ───────────────────────────────────────────────────────────
+def wrap_label(name, max_chars=10):
+    words, lines, line = name.split(), [], ""
+    for w in words:
+        if len(line) + len(w) > max_chars and line:
+            lines.append(line.strip())
+            line = w + " "
+        else:
+            line += w + " "
+    if line:
+        lines.append(line.strip())
+    return "<br>".join(lines)
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Filters & Sorting")
 
-    shelf_options = [f"Shelf {y_to_shelf[y]}" for y in all_baselines]
-    selected_shelves = st.multiselect(
-        "Shelves", shelf_options, default=shelf_options
-    )
+    shelf_options    = [f"Shelf {y_to_shelf[y]}" for y in all_baselines]
+    selected_shelves = st.multiselect("Shelves", shelf_options, default=shelf_options)
     selected_shelf_nums = {int(s.split()[1]) for s in selected_shelves}
 
     sku_search = st.text_input("Search by product name or SKU", "")
 
     st.divider()
-    sort_col = st.selectbox(
-        "Sort table by",
-        ["Shelf", "Product", "SKU", "x (in)", "W (in)", "H (in)"]
-    )
+    sort_col = st.selectbox("Sort table by",
+                            ["Shelf", "Product", "SKU", "x (in)", "W (in)", "H (in)"])
     sort_asc = st.radio("Order", ["Ascending", "Descending"]) == "Ascending"
 
-# ── Filter data ───────────────────────────────────────────────────────────────
+    st.divider()
+    if st.button("Clear selection", use_container_width=True):
+        st.session_state.selected_skus = set()
+        st.rerun()
+
+    if st.session_state.selected_skus:
+        st.caption(f"**{len(st.session_state.selected_skus)}** product(s) selected")
+        st.caption("Shift-click or box-drag to multi-select")
+    else:
+        st.caption("Click a product to select it")
+        st.caption("Shift-click or box-drag to multi-select")
+
+# ── Filter ────────────────────────────────────────────────────────────────────
 def matches(item):
-    shelf_num = y_to_shelf[item["y_pos"]]
-    if shelf_num not in selected_shelf_nums:
+    if y_to_shelf[item["y_pos"]] not in selected_shelf_nums:
         return False
     if sku_search:
         q = sku_search.lower()
@@ -86,128 +108,166 @@ def matches(item):
             return False
     return True
 
-filtered_data = [item for item in all_data if matches(item)]
+filtered_data    = [item for item in all_data if matches(item)]
+filtered_skus    = {item["products"].get("sku") for item in filtered_data}
+any_selected     = bool(st.session_state.selected_skus)
 
-# ── Metrics (based on filtered set) ───────────────────────────────────────────
-col1, col2, col3 = st.columns(3)
-filtered_shelves = len(set(item["y_pos"] for item in filtered_data))
+# ── Metrics ───────────────────────────────────────────────────────────────────
+c1, c2, c3 = st.columns(3)
 total_w = sum(item["products"]["width_in"] for item in filtered_data)
-col1.metric("SKUs Shown", f"{len(filtered_data)} / {len(all_data)}")
-col2.metric("Shelves Shown", f"{filtered_shelves} / {len(all_baselines)}")
-col3.metric("Linear Feet Used", f"{total_w / 12:.1f} ft / {shelf_width / 12:.0f} ft")
+c1.metric("SKUs Shown",    f"{len(filtered_data)} / {len(all_data)}")
+c2.metric("Shelves Shown", f"{len({item['y_pos'] for item in filtered_data})} / {len(all_baselines)}")
+c3.metric("Linear Feet",   f"{total_w/12:.1f} ft / {shelf_width/12:.0f} ft")
 
 st.divider()
 
-if not filtered_data:
-    st.info("No products match the current filters.")
-    st.stop()
-
-# ── Planogram ─────────────────────────────────────────────────────────────────
-# Only show shelves that have at least one visible product; keep original order
-visible_baselines = [y for y in all_baselines if y_to_shelf[y] in selected_shelf_nums
+# ── Planogram (Plotly) ────────────────────────────────────────────────────────
+visible_baselines = [y for y in all_baselines
+                     if y_to_shelf[y] in selected_shelf_nums
                      and any(item["y_pos"] == y for item in filtered_data)]
-n_visible  = len(visible_baselines)
+n_visible    = max(len(visible_baselines), 1)
 baseline_map = {y: i * shelf_gap for i, y in enumerate(visible_baselines)}
 
-fig, ax = plt.subplots(figsize=(14, 3.2 * n_visible))
-fig.patch.set_facecolor("#F8F4EE")
-ax.set_facecolor("#F8F4EE")
-ax.set_xlim(-2, shelf_width + 2)
-ax.set_ylim(-1, n_visible * shelf_gap + 2)
-ax.set_aspect("equal")
-ax.axis("off")
-fig.suptitle("Store Shelf Layout", fontsize=15, fontweight="bold", color="#2E5339", y=1.01)
+fig = go.Figure()
+fig.update_layout(
+    clickmode="event+select",
+    plot_bgcolor="#F8F4EE",
+    paper_bgcolor="#F8F4EE",
+    showlegend=False,
+    margin=dict(l=60, r=20, t=40, b=20),
+    xaxis=dict(range=[-3, shelf_width + 2], showgrid=False, zeroline=False,
+               showticklabels=True, title="Width (inches)", tickfont=dict(size=10)),
+    yaxis=dict(range=[-2, n_visible * shelf_gap + 2], showgrid=False, zeroline=False,
+               showticklabels=False, scaleanchor="x", scaleratio=1),
+    height=max(280, 260 * n_visible),
+    title=dict(text="Store Shelf Layout", font=dict(size=15, color="#2E5339"), x=0.5),
+    dragmode="select",
+)
 
-# Build a set of highlighted product ids from the SKU search
-highlighted_skus = set()
-if sku_search:
-    for item in filtered_data:
-        highlighted_skus.add(item["products"].get("sku"))
+trace_sku_map = []  # trace index → sku (None for non-interactive shelf structure)
 
 for raw_y, display_y in baseline_map.items():
-    shelf_num  = y_to_shelf[raw_y]
-    color      = SHELF_COLORS[(shelf_num - 1) % len(SHELF_COLORS)]
+    shelf_num = y_to_shelf[raw_y]
+    color     = SHELF_COLORS[(shelf_num - 1) % len(SHELF_COLORS)]
+    r, g, b   = hex_to_rgb(color)
 
     # Back panel
-    ax.add_patch(patches.Rectangle(
-        (0, display_y), shelf_width, shelf_gap - 1,
-        facecolor="#EDE3D3", edgecolor="none", zorder=1, alpha=0.6
-    ))
+    fig.add_shape(type="rect", x0=0, y0=display_y, x1=shelf_width, y1=display_y + shelf_gap - 1,
+                  fillcolor="#EDE3D3", line=dict(width=0), layer="below")
     # Shelf board
-    ax.add_patch(patches.Rectangle(
-        (0, display_y - 1.2), shelf_width, 1.2,
-        facecolor="#8B6340", edgecolor="#5C3D1E", linewidth=0.8, zorder=3
-    ))
-    # Side brackets
-    for bx in [0, shelf_width]:
-        ax.add_patch(patches.Rectangle(
-            (bx - 0.8 if bx > 0 else bx, display_y - 1.2),
-            0.8, shelf_gap, facecolor="#6B4C2A", edgecolor="none", zorder=2
-        ))
+    fig.add_shape(type="rect", x0=0, y0=display_y - 1.2, x1=shelf_width, y1=display_y,
+                  fillcolor="#8B6340", line=dict(color="#5C3D1E", width=1), layer="below")
+    # Left bracket
+    fig.add_shape(type="rect", x0=0, y0=display_y - 1.2, x1=0.8, y1=display_y + shelf_gap - 1,
+                  fillcolor="#6B4C2A", line=dict(width=0), layer="below")
+    # Right bracket
+    fig.add_shape(type="rect", x0=shelf_width - 0.8, y0=display_y - 1.2,
+                  x1=shelf_width, y1=display_y + shelf_gap - 1,
+                  fillcolor="#6B4C2A", line=dict(width=0), layer="below")
     # Shelf label
-    ax.text(-1.2, display_y + shelf_gap / 2, f"Shelf {shelf_num}",
-            fontsize=8, fontweight="bold", color="#5C3D1E",
-            va="center", ha="right", rotation=90)
+    fig.add_annotation(x=-1.5, y=display_y + shelf_gap / 2,
+                       text=f"<b>Shelf {shelf_num}</b>", showarrow=False,
+                       font=dict(size=9, color="#5C3D1E"), textangle=-90)
 
-    # All products on this shelf (draw dim ones first, bright ones on top)
+    # Products on this shelf (draw all_data items for this shelf so dimmed ones still show)
     shelf_items = [item for item in all_data if item["y_pos"] == raw_y]
     for item in shelf_items:
         p   = item["products"]
         x, w, h = item["x_pos"], p["width_in"], p["height_in"]
-        sku = p.get("sku")
+        sku = p.get("sku", "")
 
-        is_visible   = item in filtered_data
-        face_color   = color if is_visible else "#CCCCCC"
-        face_alpha   = 0.88 if is_visible else 0.3
-        label_color  = "white" if is_visible else "#999999"
+        is_filtered  = item in filtered_data
+        is_selected  = sku in st.session_state.selected_skus
 
-        ax.add_patch(FancyBboxPatch(
-            (x + 0.15, display_y + 0.15), w - 0.3, h - 0.3,
-            boxstyle="round,pad=0.1",
-            facecolor=face_color, edgecolor="white",
-            linewidth=1.2, alpha=face_alpha, zorder=4
+        if not is_filtered:
+            fc      = "rgba(200,200,200,0.25)"
+            lc      = "rgba(180,180,180,0.3)"
+            lw      = 1
+            opacity = 0.4
+        elif any_selected and not is_selected:
+            fc      = f"rgba({r},{g},{b},0.22)"
+            lc      = "rgba(255,255,255,0.35)"
+            lw      = 1
+            opacity = 0.5
+        elif is_selected:
+            fc      = f"rgba({r},{g},{b},0.95)"
+            lc      = "rgba(255,215,0,1)"   # gold border
+            lw      = 3
+            opacity = 1.0
+        else:
+            fc      = f"rgba({r},{g},{b},0.85)"
+            lc      = "rgba(255,255,255,0.9)"
+            lw      = 1.5
+            opacity = 1.0
+
+        # Filled polygon — the clickable product shape
+        fig.add_trace(go.Scatter(
+            x=[x + 0.15, x + w - 0.15, x + w - 0.15, x + 0.15, x + 0.15],
+            y=[display_y + 0.15, display_y + 0.15,
+               display_y + h - 0.15, display_y + h - 0.15, display_y + 0.15],
+            fill="toself",
+            fillcolor=fc,
+            line=dict(color=lc, width=lw),
+            mode="lines",
+            name=p["name"],
+            hovertemplate=(
+                f"<b>{p['name']}</b><br>"
+                f"SKU: {sku}<br>"
+                f"Shelf {shelf_num}<br>"
+                f"x={x}\" &nbsp;|&nbsp; {w}\"×{h}\""
+                "<extra></extra>"
+            ),
+            showlegend=False,
+            opacity=opacity,
+            # Keep plotly's own selected/unselected dimming neutral so our
+            # manual coloring is the single source of truth
+            selected=dict(marker=dict(opacity=0)),
+            unselected=dict(marker=dict(opacity=0)),
         ))
+        trace_sku_map.append(sku if is_filtered else None)
 
-        if is_visible:
-            # Highlight ring for search matches
-            if sku_search and sku in highlighted_skus:
-                ax.add_patch(FancyBboxPatch(
-                    (x + 0.05, display_y + 0.05), w - 0.1, h - 0.1,
-                    boxstyle="round,pad=0.1",
-                    facecolor="none", edgecolor="#FFD700",
-                    linewidth=2.5, zorder=5
-                ))
-            # Top highlight sheen
-            ax.add_patch(patches.Rectangle(
-                (x + 0.3, display_y + h - 1.8), w - 0.6, 1.4,
-                facecolor="white", alpha=0.18, zorder=5
-            ))
+        # Product label
+        if is_filtered:
+            label_color = ("rgba(255,255,255,1.0)"
+                           if not (any_selected and not is_selected)
+                           else "rgba(255,255,255,0.3)")
+            fig.add_annotation(
+                x=x + w / 2, y=display_y + h / 2,
+                text=f"<b>{wrap_label(p['name'])}</b>",
+                showarrow=False,
+                font=dict(size=6.5, color=label_color),
+                bgcolor="rgba(0,0,0,0)",
+                align="center",
+            )
 
-        # Label
-        words = p["name"].split()
-        lines, line = [], ""
-        for word in words:
-            if len(line) + len(word) > 10 and line:
-                lines.append(line.strip())
-                line = word + " "
-            else:
-                line += word + " "
-        if line:
-            lines.append(line.strip())
+# ── Render chart + handle click events ───────────────────────────────────────
+event = st.plotly_chart(
+    fig,
+    on_select="rerun",
+    selection_mode=["points", "box", "lasso"],
+    use_container_width=True,
+)
 
-        ax.text(x + w / 2, display_y + h / 2, "\n".join(lines),
-                ha="center", va="center", fontsize=6.2,
-                color=label_color, fontweight="bold", zorder=6,
-                path_effects=[pe.withStroke(linewidth=1.5, foreground="black")])
+if event and event.selection and event.selection.points is not None:
+    clicked_skus = set()
+    for pt in event.selection.points:
+        idx = pt.get("curve_number")
+        if idx is not None and idx < len(trace_sku_map) and trace_sku_map[idx]:
+            clicked_skus.add(trace_sku_map[idx])
+    if clicked_skus != st.session_state.selected_skus:
+        st.session_state.selected_skus = clicked_skus
+        st.rerun()
 
-plt.tight_layout()
-st.pyplot(fig, use_container_width=True)
-
-# ── Sortable table ────────────────────────────────────────────────────────────
+# ── Table — further filtered by click selection ───────────────────────────────
 st.subheader("Product Placement")
 
+table_data = filtered_data
+if st.session_state.selected_skus:
+    table_data = [item for item in filtered_data
+                  if item["products"].get("sku") in st.session_state.selected_skus]
+
 rows = []
-for item in filtered_data:
+for item in table_data:
     p = item["products"]
     rows.append({
         "Shelf":   y_to_shelf[item["y_pos"]],
