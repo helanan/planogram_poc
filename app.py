@@ -39,7 +39,11 @@ supabase = create_client(url, key)
 # ── Session state ─────────────────────────────────────────────────────────────
 if "selected_skus" not in st.session_state:
     st.session_state.selected_skus = set()
-if "sku_search" not in st.session_state:
+
+# Clear flag must be processed BEFORE the text_input widget is created,
+# otherwise Streamlit raises an error for setting a bound widget's key.
+if st.session_state.get("_clear_search"):
+    st.session_state._clear_search = False
     st.session_state.sku_search = ""
 
 # ── Raw data ──────────────────────────────────────────────────────────────────
@@ -84,7 +88,7 @@ with st.sidebar:
     sku_search = st.text_input("Search by product name or SKU", key="sku_search")
     if sku_search:
         if st.button("✕ Clear search", use_container_width=True):
-            st.session_state.sku_search = ""
+            st.session_state._clear_search = True
             st.rerun()
 
     st.divider()
