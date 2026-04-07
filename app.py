@@ -39,6 +39,8 @@ supabase = create_client(url, key)
 # ── Session state ─────────────────────────────────────────────────────────────
 if "selected_skus" not in st.session_state:
     st.session_state.selected_skus = set()
+if "sku_search" not in st.session_state:
+    st.session_state.sku_search = ""
 
 # ── Raw data ──────────────────────────────────────────────────────────────────
 response = supabase.table("shelf_layout").select("*, products(*)").execute()
@@ -74,11 +76,16 @@ def wrap_label(name, max_chars=10):
 with st.sidebar:
     st.header("Filters & Sorting")
 
-    shelf_options    = [f"Shelf {y_to_shelf[y]}" for y in all_baselines]
-    selected_shelves = st.multiselect("Shelves", shelf_options, default=shelf_options)
+    shelf_options       = [f"Shelf {y_to_shelf[y]}" for y in all_baselines]
+    selected_shelves    = st.multiselect("Shelves", shelf_options, default=shelf_options)
     selected_shelf_nums = {int(s.split()[1]) for s in selected_shelves}
 
-    sku_search = st.text_input("Search by product name or SKU", "")
+    # Search box with its own clear button
+    sku_search = st.text_input("Search by product name or SKU", key="sku_search")
+    if sku_search:
+        if st.button("✕ Clear search", use_container_width=True):
+            st.session_state.sku_search = ""
+            st.rerun()
 
     st.divider()
     sort_col = st.selectbox("Sort table by",
@@ -107,9 +114,8 @@ def matches(item):
             return False
     return True
 
-filtered_data    = [item for item in all_data if matches(item)]
-filtered_skus    = {item["products"].get("sku") for item in filtered_data}
-any_selected     = bool(st.session_state.selected_skus)
+filtered_data = [item for item in all_data if matches(item)]
+any_selected  = bool(st.session_state.selected_skus)
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 c1, c2, c3 = st.columns(3)
@@ -120,7 +126,7 @@ c3.metric("Linear Feet",   f"{total_w/12:.1f} ft / {shelf_width/12:.0f} ft")
 
 st.divider()
 
-# ── Planogram (Plotly) ────────────────────────────────────────────────────────
+# ── Planogram ─────────────────────────────────────────────────────────────────
 visible_baselines = [y for y in all_baselines
                      if y_to_shelf[y] in selected_shelf_nums
                      and any(item["y_pos"] == y for item in filtered_data)]
@@ -143,90 +149,83 @@ fig.update_layout(
     dragmode="select",
 )
 
-trace_sku_map = []  # trace index → sku (None for non-interactive shelf structure)
+# trace index → sku for interactive center-point traces only
+trace_sku_map = []
 
 for raw_y, display_y in baseline_map.items():
     shelf_num = y_to_shelf[raw_y]
     color     = SHELF_COLORS[(shelf_num - 1) % len(SHELF_COLORS)]
     r, g, b   = hex_to_rgb(color)
 
-    # Back panel
+    # Shelf structure — all pure shapes, no hover, no interaction
     fig.add_shape(type="rect", x0=0, y0=display_y, x1=shelf_width, y1=display_y + shelf_gap - 1,
                   fillcolor="#EDE3D3", line=dict(width=0), layer="below")
-    # Shelf board
     fig.add_shape(type="rect", x0=0, y0=display_y - 1.2, x1=shelf_width, y1=display_y,
                   fillcolor="#8B6340", line=dict(color="#5C3D1E", width=1), layer="below")
-    # Left bracket — sits outside the product area so nothing overlaps
     fig.add_shape(type="rect", x0=-0.8, y0=display_y - 1.2, x1=0, y1=display_y + shelf_gap - 1,
                   fillcolor="#6B4C2A", line=dict(width=0), layer="below")
-    # Right bracket
     fig.add_shape(type="rect", x0=shelf_width, y0=display_y - 1.2,
                   x1=shelf_width + 0.8, y1=display_y + shelf_gap - 1,
                   fillcolor="#6B4C2A", line=dict(width=0), layer="below")
-    # Shelf label
     fig.add_annotation(x=-1.5, y=display_y + shelf_gap / 2,
                        text=f"<b>Shelf {shelf_num}</b>", showarrow=False,
                        font=dict(size=9, color="#5C3D1E"), textangle=-90)
 
-    # Products on this shelf (draw all_data items for this shelf so dimmed ones still show)
     shelf_items = [item for item in all_data if item["y_pos"] == raw_y]
     for item in shelf_items:
         p   = item["products"]
         x, w, h = item["x_pos"], p["width_in"], p["height_in"]
         sku = p.get("sku", "")
 
-        is_filtered  = item in filtered_data
-        is_selected  = sku in st.session_state.selected_skus
+        is_filtered = item in filtered_data
+        is_selected = sku in st.session_state.selected_skus
 
         if not is_filtered:
-            fc      = "rgba(200,200,200,0.25)"
-            lc      = "rgba(180,180,180,0.3)"
-            lw      = 1
-            opacity = 0.4
+            fc, lc, lw, opacity = "rgba(200,200,200,0.25)", "rgba(180,180,180,0.3)", 1, 0.4
         elif any_selected and not is_selected:
-            fc      = f"rgba({r},{g},{b},0.22)"
-            lc      = "rgba(255,255,255,0.35)"
-            lw      = 1
-            opacity = 0.5
+            fc, lc, lw, opacity = f"rgba({r},{g},{b},0.22)", "rgba(255,255,255,0.35)", 1, 0.5
         elif is_selected:
-            fc      = f"rgba({r},{g},{b},0.95)"
-            lc      = "rgba(255,215,0,1)"   # gold border
-            lw      = 3
-            opacity = 1.0
+            fc, lc, lw, opacity = f"rgba({r},{g},{b},0.95)", "rgba(255,215,0,1)", 3, 1.0
         else:
-            fc      = f"rgba({r},{g},{b},0.85)"
-            lc      = "rgba(255,255,255,0.9)"
-            lw      = 1.5
-            opacity = 1.0
+            fc, lc, lw, opacity = f"rgba({r},{g},{b},0.85)", "rgba(255,255,255,0.9)", 1.5, 1.0
 
-        # Filled polygon — the clickable product shape
-        # mode="lines+markers" is required so plotly has selectable "points";
-        # markers are near-invisible. hoveron="fills" fires a single tooltip
-        # for the whole fill area instead of one per vertex.
-        fig.add_trace(go.Scatter(
-            x=[x + 0.15, x + w - 0.15, x + w - 0.15, x + 0.15, x + 0.15],
-            y=[display_y + 0.15, display_y + 0.15,
-               display_y + h - 0.15, display_y + h - 0.15, display_y + 0.15],
-            fill="toself",
+        # ── Visual rectangle — shape only, zero interaction, zero hover ──────
+        fig.add_shape(
+            type="rect",
+            x0=x + 0.15, y0=display_y + 0.15,
+            x1=x + w - 0.15, y1=display_y + h - 0.15,
             fillcolor=fc,
             line=dict(color=lc, width=lw),
-            mode="lines+markers",
-            marker=dict(size=1, opacity=0.01, color=lc),
-            hoveron="fills",
-            name=p["name"],
-            hovertemplate=(
-                f"<b>{p['name']}</b><br>"
-                f"SKU: {sku}<br>"
-                f"Shelf {shelf_num}<br>"
-                f"x={x}\" &nbsp;|&nbsp; {w}\"×{h}\""
-                "<extra></extra>"
-            ),
-            showlegend=False,
             opacity=opacity,
-            selected=dict(marker=dict(opacity=0.01)),
-            unselected=dict(marker=dict(opacity=0.01)),
-        ))
-        trace_sku_map.append(sku if is_filtered else None)
+            layer="above",
+        )
+
+        # ── Invisible center point — the ONLY thing with hover and selection ─
+        # A single point at the product center means:
+        #   • exactly one tooltip fires per product (no duplicate)
+        #   • box-drag just needs to cross the center to select the product
+        if is_filtered:
+            fig.add_trace(go.Scatter(
+                x=[x + w / 2],
+                y=[display_y + h / 2],
+                mode="markers",
+                marker=dict(size=2, opacity=0.01, color="rgba(0,0,0,0)"),
+                name=p["name"],
+                hovertemplate=(
+                    f"<b>{p['name']}</b><br>"
+                    f"SKU: {sku}<br>"
+                    f"Shelf {shelf_num}<br>"
+                    f"x={x}\" &nbsp;|&nbsp; {w}\"×{h}\""
+                    "<extra></extra>"
+                ),
+                showlegend=False,
+                selected=dict(marker=dict(opacity=0.01)),
+                unselected=dict(marker=dict(opacity=0.01)),
+            ))
+            trace_sku_map.append(sku)
+        else:
+            # Dimmed products: shape already drawn above, no interactive trace
+            pass
 
         # Product label
         if is_filtered:
@@ -242,7 +241,7 @@ for raw_y, display_y in baseline_map.items():
                 align="center",
             )
 
-# ── Render chart + handle click events ───────────────────────────────────────
+# ── Render + handle selection events ─────────────────────────────────────────
 event = st.plotly_chart(
     fig,
     on_select="rerun",
@@ -254,13 +253,13 @@ if event and event.selection and event.selection.points is not None:
     clicked_skus = set()
     for pt in event.selection.points:
         idx = pt.get("curve_number")
-        if idx is not None and idx < len(trace_sku_map) and trace_sku_map[idx]:
+        if idx is not None and idx < len(trace_sku_map):
             clicked_skus.add(trace_sku_map[idx])
     if clicked_skus != st.session_state.selected_skus:
         st.session_state.selected_skus = clicked_skus
         st.rerun()
 
-# ── Table — further filtered by click selection ───────────────────────────────
+# ── Table ─────────────────────────────────────────────────────────────────────
 st.subheader("Product Placement")
 
 table_data = filtered_data
