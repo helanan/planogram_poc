@@ -92,10 +92,9 @@ with st.sidebar:
 
     if st.session_state.selected_skus:
         st.caption(f"**{len(st.session_state.selected_skus)}** product(s) selected")
-        st.caption("Shift-click or box-drag to multi-select")
     else:
         st.caption("Click a product to select it")
-        st.caption("Shift-click or box-drag to multi-select")
+    st.caption("Drag to box-select multiple products")
 
 # ── Filter ────────────────────────────────────────────────────────────────────
 def matches(item):
@@ -157,12 +156,12 @@ for raw_y, display_y in baseline_map.items():
     # Shelf board
     fig.add_shape(type="rect", x0=0, y0=display_y - 1.2, x1=shelf_width, y1=display_y,
                   fillcolor="#8B6340", line=dict(color="#5C3D1E", width=1), layer="below")
-    # Left bracket
-    fig.add_shape(type="rect", x0=0, y0=display_y - 1.2, x1=0.8, y1=display_y + shelf_gap - 1,
+    # Left bracket — sits outside the product area so nothing overlaps
+    fig.add_shape(type="rect", x0=-0.8, y0=display_y - 1.2, x1=0, y1=display_y + shelf_gap - 1,
                   fillcolor="#6B4C2A", line=dict(width=0), layer="below")
     # Right bracket
-    fig.add_shape(type="rect", x0=shelf_width - 0.8, y0=display_y - 1.2,
-                  x1=shelf_width, y1=display_y + shelf_gap - 1,
+    fig.add_shape(type="rect", x0=shelf_width, y0=display_y - 1.2,
+                  x1=shelf_width + 0.8, y1=display_y + shelf_gap - 1,
                   fillcolor="#6B4C2A", line=dict(width=0), layer="below")
     # Shelf label
     fig.add_annotation(x=-1.5, y=display_y + shelf_gap / 2,
@@ -201,6 +200,9 @@ for raw_y, display_y in baseline_map.items():
             opacity = 1.0
 
         # Filled polygon — the clickable product shape
+        # mode="lines+markers" is required so plotly has selectable "points";
+        # markers are near-invisible. hoveron="fills" fires a single tooltip
+        # for the whole fill area instead of one per vertex.
         fig.add_trace(go.Scatter(
             x=[x + 0.15, x + w - 0.15, x + w - 0.15, x + 0.15, x + 0.15],
             y=[display_y + 0.15, display_y + 0.15,
@@ -208,7 +210,9 @@ for raw_y, display_y in baseline_map.items():
             fill="toself",
             fillcolor=fc,
             line=dict(color=lc, width=lw),
-            mode="lines",
+            mode="lines+markers",
+            marker=dict(size=1, opacity=0.01, color=lc),
+            hoveron="fills",
             name=p["name"],
             hovertemplate=(
                 f"<b>{p['name']}</b><br>"
@@ -219,10 +223,8 @@ for raw_y, display_y in baseline_map.items():
             ),
             showlegend=False,
             opacity=opacity,
-            # Keep plotly's own selected/unselected dimming neutral so our
-            # manual coloring is the single source of truth
-            selected=dict(marker=dict(opacity=0)),
-            unselected=dict(marker=dict(opacity=0)),
+            selected=dict(marker=dict(opacity=0.01)),
+            unselected=dict(marker=dict(opacity=0.01)),
         ))
         trace_sku_map.append(sku if is_filtered else None)
 
