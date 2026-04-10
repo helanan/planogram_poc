@@ -193,16 +193,33 @@ for raw_y, display_y in baseline_map.items():
         else:
             fc, lc, lw, opacity = f"rgba({r},{g},{b},0.85)", "rgba(255,255,255,0.9)", 1.5, 1.0
 
-        # ── Visual rectangle — shape only, zero interaction, zero hover ──────
+        image_url = p.get("image_url") or ""
+        has_image = bool(image_url) and is_filtered
+
+        # ── Visual rectangle — border always drawn; fill only when no image ──
         fig.add_shape(
             type="rect",
             x0=x + 0.15, y0=display_y + 0.15,
             x1=x + w - 0.15, y1=display_y + h - 0.15,
-            fillcolor=fc,
+            fillcolor=fc if not has_image else "rgba(0,0,0,0)",
             line=dict(color=lc, width=lw),
             opacity=opacity,
             layer="above",
         )
+
+        # ── Product image overlay (when image_url is set) ────────────────────
+        if has_image:
+            fig.add_layout_image(dict(
+                source=image_url,
+                xref="x", yref="y",
+                x=x + 0.25,
+                y=display_y + h - 0.25,   # plotly image anchor is top-left
+                sizex=w - 0.5,
+                sizey=h - 0.5,
+                sizing="stretch",
+                opacity=1.0 if not (any_selected and not is_selected) else 0.25,
+                layer="above",
+            ))
 
         # ── Invisible center point — the ONLY thing with hover and selection ─
         # A single point at the product center means:
@@ -227,12 +244,9 @@ for raw_y, display_y in baseline_map.items():
                 unselected=dict(marker=dict(opacity=0.01)),
             ))
             trace_sku_map.append(sku)
-        else:
-            # Dimmed products: shape already drawn above, no interactive trace
-            pass
 
-        # Product label
-        if is_filtered:
+        # ── Product label (hidden when image fills the box) ───────────────────
+        if is_filtered and not has_image:
             label_color = ("rgba(255,255,255,1.0)"
                            if not (any_selected and not is_selected)
                            else "rgba(255,255,255,0.3)")
