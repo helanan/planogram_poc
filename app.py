@@ -1,7 +1,24 @@
 import os
+import base64
+import requests
 import streamlit as st
 from supabase import create_client
 import plotly.graph_objects as go
+
+
+@st.cache_data(ttl=3600)
+def fetch_image_b64(url: str) -> str:
+    """Fetch an image and return it as a base64 data URI.
+    Caching avoids re-fetching on every Streamlit rerun.
+    Using base64 sidesteps browser CORS restrictions on external image URLs."""
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        mime = resp.headers.get("content-type", "image/jpeg").split(";")[0]
+        b64  = base64.b64encode(resp.content).decode()
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return ""
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Heartland Supply Co. — Planogram", layout="wide")
@@ -194,7 +211,10 @@ for raw_y, display_y in baseline_map.items():
             fc, lc, lw, opacity = f"rgba({r},{g},{b},0.85)", "rgba(255,255,255,0.9)", 1.5, 1.0
 
         image_url = p.get("image_url") or ""
-        has_image = bool(image_url) and is_filtered
+        # Fetch server-side and encode as base64 so Plotly never makes a
+        # cross-origin request from the browser (avoids CORS failures).
+        image_src = fetch_image_b64(image_url) if image_url and is_filtered else ""
+        has_image = bool(image_src)
 
         # ── Visual rectangle — border always drawn; fill only when no image ──
         fig.add_shape(
@@ -210,7 +230,7 @@ for raw_y, display_y in baseline_map.items():
         # ── Product image overlay (when image_url is set) ────────────────────
         if has_image:
             fig.add_layout_image(dict(
-                source=image_url,
+                source=image_src,
                 xref="x", yref="y",
                 x=x + 0.25,
                 y=display_y + h - 0.25,   # plotly image anchor is top-left
